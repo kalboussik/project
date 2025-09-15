@@ -1,0 +1,3 @@
+idf_component_register(SRCS "wur_sx1261.c" "sx126x.c" "ra01s.c"
+                    INCLUDE_DIRS "include"
+                    REQUIRES driver esp_timer)
