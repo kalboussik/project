@@ -1,1057 +1,834 @@
-# SX1261 LoRa Radio Driver Documentation
+# ESP32-S3 Wubble Protocol Implementation Documentation
+## ESP-IDF 5.3.1
 
-## 📋 Project Overview
+## Table of Contents
+1. [System Overview](#1-system-overview)
+2. [Architecture](#2-architecture)
+3. [Block Diagrams](#3-block-diagrams)
+4. [Sequence Diagrams](#4-sequence-diagrams)
+5. [Flowcharts](#5-flowcharts)
+6. [Component Details](#6-component-details)
+7. [Configuration](#7-configuration)
+8. [API Reference](#8-api-reference)
+9. [State Machine](#9-state-machine)
+10. [Power Management](#10-power-management)
 
-This project implements a comprehensive driver for the SX1261 LoRa radio transceiver on ESP32-S3 using ESP-IDF 5.3.1. The driver provides both traditional LoRa communication and Wake-up Radio (WuR) functionality using GFSK modulation for ultra-low power applications.
+---
+
+## 1. System Overview
+
+The Wubble protocol is a hybrid wake-up and discovery mechanism designed for ultra-low power IoT devices using ESP32-S3 with ESP-IDF 5.3.1.
 
 ### Key Features
+- **Wake-up Radio (WUR)**: SX1261 LoRa transceiver for ultra-low power wake-up
+- **BLE Neighbor Discovery**: NimBLE stack for discovering nearby devices (TDV - Table De Voisinage)
+- **Multi-role State Machine**: Initiator, Listener, Announcer, Voyager states
+- **Deep Sleep Optimization**: RTC memory retention and GPIO wake-up
+- **Dual Communication**: 868 MHz WUR + 2.4 GHz BLE
 
-- **Full SX1261 Radio Control**: Complete implementation of SX126x command set
-- **LoRa Communication**: Traditional LoRa packet transmission and reception
-- **Wake-up Radio (WuR)**: Ultra-low power wake-up signal detection using GFSK
-- **ESP32-S3 Optimized**: Hardware abstraction layer for ESP32-S3 SPI interface
-- **Power Management**: Support for both LDO and DC-DC regulator modes
-- **TCXO Support**: Configurable temperature-compensated crystal oscillator control
-- **Flexible GPIO Control**: Configurable TX/RX enable pins and interrupt handling
-
----
-
-## 🔧 Hardware Requirements
-
-### ESP32-S3 Pin Configuration
-
-| Signal | GPIO Pin | Description | Required |
-|--------|----------|-------------|----------|
-| **SPI Signals** | | | |
-| MISO | `PIN_SPI_MISO` | SPI Master In Slave Out | ✅ |
-| MOSI | `PIN_SPI_MOSI` | SPI Master Out Slave In | ✅ |
-| SCLK | `PIN_SPI_SCLK` | SPI Clock | ✅ |
-| **Radio Control** | | | |
-| NSS | `CONFIG_NSS_GPIO` | SPI Chip Select (Active Low) | ✅ |
-| RESET | `CONFIG_RST_GPIO` | Radio Reset (Active Low) | ✅ |
-| BUSY | `CONFIG_BUSY_GPIO` | Radio Busy Status | ✅ |
-| DIO1 | `CONFIG_DIO1_GPIO` | Digital I/O 1 (Interrupts) | ✅ |
-| **RF Switching** | | | |
-| TXEN | `CONFIG_TXEN_GPIO` | TX Enable Control | ⚠️ Optional |
-| RXEN | `CONFIG_RXEN_GPIO` | RX Enable Control | ⚠️ Optional |
-
-### SX1261 Radio Module Specifications
-
-- **Frequency Range**: 150 MHz to 960 MHz
-- **LoRa Data Rate**: 0.018 to 62.5 kbps
-- **GFSK Data Rate**: 0.6 to 300 kbps
-- **Output Power**: -17 to +14 dBm
-- **Sensitivity**: Down to -148 dBm (LoRa SF12, 125 kHz)
-- **Power Consumption**: 
-  - RX: 4.2 mA
-  - TX 14dBm: 44 mA
-  - Sleep: 160 nA
+### System Specifications
+- **MCU**: ESP32-S3 (Dual-core Xtensa LX7 @ 160 MHz)
+- **WUR Radio**: SX1261 (868 MHz, GFSK modulation)
+- **BLE**: NimBLE stack (BLE 5.0 compatible)
+- **Power States**: Active, Light Sleep, Deep Sleep
+- **Wake Sources**: GPIO (EXT1), WUR signal
 
 ---
 
-## 🏗️ System Architecture
+## 2. Architecture
 
-### Hardware Block Diagram
-
-```mermaid
-graph TB
-    subgraph ESP32["ESP32-S3 SoC"]
-        SPI[SPI Controller]
-        GPIO[GPIO Controller]
-        CPU[Dual Core CPU]
-        PWR[Power Management]
-    end
-    
-    subgraph SIGNALS["Interface Signals"]
-        MISO[MISO - Pin 37]
-        MOSI[MOSI - Pin 35]
-        SCLK[SCLK - Pin 36]
-        NSS[NSS - Pin 10]
-        RESET[RESET - Pin 11]
-        BUSY[BUSY - Pin 12]
-        DIO1[DIO1 - Pin 13]
-        TXEN[TXEN - Pin 14]
-        RXEN[RXEN - Pin 15]
-    end
-    
-    subgraph SX1261["SX1261 Radio Module"]
-        RF[RF Frontend]
-        MODEM[LoRa/GFSK Modem]
-        XTAL[32MHz Crystal]
-        TCXO[TCXO Optional]
-        REGS[Internal Regulators]
-    end
-    
-    subgraph EXTERNAL["External Components"]
-        ANT[📡 Antenna]
-        SUPPLY[🔋 3.3V Supply]
-        CAPS[⚡ Bypass Caps]
-    end
-    
-    SPI --> MISO
-    SPI --> MOSI  
-    SPI --> SCLK
-    GPIO --> NSS
-    GPIO --> RESET
-    GPIO --> BUSY
-    GPIO --> DIO1
-    GPIO --> TXEN
-    GPIO --> RXEN
-    
-    MISO --> MODEM
-    MOSI --> MODEM
-    SCLK --> MODEM
-    NSS --> MODEM
-    RESET --> MODEM
-    BUSY --> MODEM
-    DIO1 --> MODEM
-    TXEN --> RF
-    RXEN --> RF
-    
-    RF --> ANT
-    SUPPLY --> REGS
-    REGS --> MODEM
-    XTAL --> MODEM
-    TCXO --> MODEM
-```
-
-### Software Architecture Block Diagram
+### 2.1 Layered Architecture
 
 ```mermaid
 graph TB
-    subgraph APP["Application Layer"]
-        USER[User Application]
-        LORA_APP[LoRa Communication]
-        WUR_APP[WuR Communication]
-        TASKS[FreeRTOS Tasks]
+    subgraph "Application Layer"
+        APP[Application Logic]
+        WUBBLE[Wubble Protocol Manager]
+        SM[State Machine Controller]
     end
     
-    subgraph API["Driver API Layer"]
-        LORA_API[LoRa Driver API]
-        WUR_API[WuR Driver API]
-        CONFIG_API[Configuration API]
-        UTIL[Utility Functions]
+    subgraph "Protocol Layer"
+        TDV[TDV Manager<br/>Table De Voisinage]
+        WUR_PROTO[WUR Protocol]
+        BLE_ADV[BLE Advertisement]
+        BLE_SCAN[BLE Scanner]
     end
     
-    subgraph CORE["Core Driver Layer"]
-        CMD[Command Layer]
-        PACKET[Packet Manager]
-        IRQ[IRQ Handler]
-        STATE[State Manager]
+    subgraph "Communication Layer"
+        NIMBLE[NimBLE Stack]
+        SX1261_DRV[SX1261 Driver]
     end
     
-    subgraph HAL["Hardware Abstraction Layer"]
+    subgraph "HAL - Hardware Abstraction Layer"
         SPI_HAL[SPI HAL]
         GPIO_HAL[GPIO HAL]
         TIMER_HAL[Timer HAL]
-        ERROR[Error Handler]
+        BT_CTRL[BT Controller]
     end
     
-    subgraph DRIVERS["ESP-IDF Drivers"]
-        SPI_DRV[SPI Driver]
-        GPIO_DRV[GPIO Driver]
-        TIMER_DRV[Timer Driver]
-        LOG[Logging]
+    subgraph "System Services"
+        PM[Power Manager]
+        DS[Deep Sleep Controller]
+        RTC_MEM[RTC Memory]
+        ISR[Interrupt Service]
     end
     
-    USER --> LORA_API
-    USER --> WUR_API
-    LORA_APP --> LORA_API
-    WUR_APP --> WUR_API
-    
-    LORA_API --> CMD
-    WUR_API --> CMD
-    CONFIG_API --> PACKET
-    
-    CMD --> SPI_HAL
-    PACKET --> SPI_HAL
-    IRQ --> GPIO_HAL
-    STATE --> TIMER_HAL
-    
-    SPI_HAL --> SPI_DRV
-    GPIO_HAL --> GPIO_DRV
-    TIMER_HAL --> TIMER_DRV
-    ERROR --> LOG
-```
-
-### Data Flow Block Diagram
-
-```mermaid
-graph LR
-    subgraph TX["Transmit Path"]
-        APP_TX[Application Data] --> TX_BUF[TX Buffer]
-        TX_BUF --> FORMAT[Packet Formatter]
-        FORMAT --> MOD[Modulator]
-        MOD --> PA[Power Amplifier]
-        PA --> ANT_TX[📡 Antenna]
+    subgraph "Hardware Layer"
+        ESP32S3[ESP32-S3 SoC]
+        SX1261_HW[SX1261 Radio]
+        BLE_HW[BLE Radio]
     end
     
-    subgraph RX["Receive Path"]
-        ANT_RX[📡 Antenna] --> LNA[Low Noise Amp]
-        LNA --> DEMOD[Demodulator]
-        DEMOD --> DECODE[Packet Decoder]
-        DECODE --> RX_BUF[RX Buffer]
-        RX_BUF --> APP_RX[Application Data]
-    end
-    
-    subgraph CTRL["Control & Status"]
-        CMD_IF[Command Interface]
-        STATUS[Status Registers]
-        IRQ_ST[IRQ Status]
-        SM[State Machine]
-        TIMING[Timing Control]
-    end
-    
-    CMD_IF --> SM
-    SM --> TIMING
-    IRQ_ST --> STATUS
-```
-
-### SPI Communication Block Diagram
-
-```mermaid
-graph TB
-    subgraph ESP32_SPI["ESP32-S3 SPI Master"]
-        SPI_CTRL[SPI Controller]
-        DMA[DMA Controller]
-        GPIO_SPI[GPIO Matrix]
-    end
-    
-    subgraph SPI_SIGNALS["SPI Signal Lines"]
-        MOSI_S[MOSI: Commands & Data →]
-        MISO_S[MISO: Status & Data ←]
-        SCLK_S[SCLK: 2MHz Clock]
-        NSS_S[NSS: Chip Select ↓]
-    end
-    
-    subgraph SX1261_SPI["SX1261 SPI Slave"]
-        SPI_IF[SPI Interface]
-        CMD_DEC[Command Decoder]
-        REG_MAP[Register Map]
-        FIFO[FIFO Buffers]
-    end
-    
-    subgraph PROTOCOL["SPI Protocol Phases"]
-        CMD_PHASE[1. Command Phase]
-        ADDR_PHASE[2. Address Phase]
-        DATA_PHASE[3. Data Phase]
-        STATUS_PHASE[4. Status Phase]
-    end
-    
-    SPI_CTRL --> MOSI_S
-    MISO_S --> SPI_CTRL
-    SPI_CTRL --> SCLK_S
-    GPIO_SPI --> NSS_S
-    
-    MOSI_S --> SPI_IF
-    SPI_IF --> MISO_S
-    SCLK_S --> SPI_IF
-    NSS_S --> SPI_IF
-    
-    SPI_IF --> CMD_DEC
-    CMD_DEC --> REG_MAP
-    CMD_DEC --> FIFO
-```
-
-### Power Management Block Diagram
-
-```mermaid
-graph TB
-    subgraph POWER_IN["Power Input"]
-        VDD[VDD 3.3V Input]
-        GND[Ground]
-        BYPASS[Bypass Capacitors]
-    end
-    
-    subgraph REGULATORS["Internal Regulators"]
-        LDO[LDO Regulator]
-        DCDC[DC-DC Regulator]
-        REG_SEL[Regulator Select]
-    end
-    
-    subgraph DOMAINS["Power Domains"]
-        DIGITAL[Digital Core]
-        RF_PWR[RF Frontend]
-        OSC[Crystal/TCXO]
-    end
-    
-    subgraph MODES["Power Modes"]
-        SLEEP[Sleep Mode<br/>160nA]
-        STANDBY[Standby Mode<br/>1.5µA]
-        RX_MODE[RX Mode<br/>4.2mA]
-        TX_MODE[TX Mode<br/>17-44mA]
-    end
-    
-    VDD --> LDO
-    VDD --> DCDC
-    REG_SEL --> LDO
-    REG_SEL --> DCDC
-    
-    LDO --> DIGITAL
-    DCDC --> DIGITAL
-    DIGITAL --> RF_PWR
-    DIGITAL --> OSC
-    
-    DIGITAL --> SLEEP
-    DIGITAL --> STANDBY
-    DIGITAL --> RX_MODE
-    DIGITAL --> TX_MODE
-```
-
-### Complete System Integration Block Diagram
-
-```mermaid
-graph TB
-    subgraph EXTERNAL["External System"]
-        USER_APP[User Application]
-        FREERTOS[FreeRTOS Kernel]
-        ANTENNA[📡 Antenna System]
-        POWER_SYS[🔋 Power System]
-    end
-    
-    subgraph ESP32_SYSTEM["ESP32-S3 System"]
-        APP_LAYER[Application Layer]
-        DRIVER_LAYER[Driver Layer]
-        HAL_LAYER[HAL Layer]
-        HW_LAYER[Hardware Layer]
-    end
-    
-    subgraph SX1261_SYSTEM["SX1261 Radio System"]
-        DIGITAL_CORE[Digital Core]
-        RF_CORE[RF Core]
-        MODEM_CORE[Modem Core]
-        BUFFER_CORE[Buffer Core]
-    end
-    
-    subgraph INTERFACES["Interface Layer"]
-        SPI_BUS[SPI Bus Interface]
-        GPIO_BUS[GPIO Interface]
-        RF_INTERFACE[RF Interface]
-        POWER_INTERFACE[Power Interface]
-    end
-    
-    USER_APP --> APP_LAYER
-    FREERTOS --> APP_LAYER
-    
-    APP_LAYER --> DRIVER_LAYER
-    DRIVER_LAYER --> HAL_LAYER
-    HAL_LAYER --> HW_LAYER
-    
-    HW_LAYER --> SPI_BUS
-    HW_LAYER --> GPIO_BUS
-    
-    SPI_BUS --> DIGITAL_CORE
-    GPIO_BUS --> DIGITAL_CORE
-    
-    DIGITAL_CORE --> MODEM_CORE
-    DIGITAL_CORE --> BUFFER_CORE
-    MODEM_CORE --> RF_CORE
-    
-    RF_CORE --> RF_INTERFACE
-    RF_INTERFACE --> ANTENNA
-    
-    POWER_SYS --> POWER_INTERFACE
-    POWER_INTERFACE --> DIGITAL_CORE
-```
-
-### Driver Layers
-
-#### 1. **Application Interface Layer**
-- `LoRaBegin()` - Initialize radio
-- `LoRaSend()` - Send LoRa packets
-- `LoRaReceive()` - Receive LoRa packets
-- `send_WUR()` - Send wake-up signals
-- `Listen_WUR()` - Listen for wake-up signals
-
-#### 2. **Command Abstraction Layer**
-- High-level radio configuration functions
-- Packet handling and buffer management
-- IRQ status management
-- Power and frequency control
-
-#### 3. **SX126x Protocol Layer**
-- Direct SX126x command implementation
-- Register access functions
-- Low-level packet operations
-- Hardware abstraction interface
-
-#### 4. **Hardware Abstraction Layer (HAL)**
-- SPI communication interface
-- GPIO control and status reading
-- Timing and delay functions
-- Platform-specific implementations
-
----
-
-## 📡 Communication Protocols
-
-### LoRa Communication Flow
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Driver as LoRa Driver
-    participant Radio as SX1261 Radio
-    participant HAL as HAL Layer
-    
-    Note over App,HAL: Initialization Sequence
-    App->>Driver: LoRaBegin(freq, power, tcxo, regulator)
-    Driver->>HAL: Reset()
-    HAL->>Radio: Hardware Reset
-    Driver->>Radio: SetStandby()
-    Driver->>Radio: SetRegulatorMode()
-    Driver->>Radio: Calibrate()
-    Driver->>Radio: SetPaConfig()
-    Driver->>Radio: SetRfFrequency()
-    
-    Note over App,HAL: Transmission Sequence
-    App->>Driver: LoRaSend(data, length, mode)
-    Driver->>Radio: SetPacketParams()
-    Driver->>Radio: ClearIrqStatus()
-    Driver->>Radio: WriteBuffer(data)
-    Driver->>Radio: SetTx(timeout)
-    
-    alt Synchronous Mode
-        Driver->>Radio: GetIrqStatus()
-        Radio-->>Driver: IRQ Status
-        Driver->>Radio: SetRx() (Auto-fallback)
-    end
-    
-    Note over App,HAL: Reception Sequence
-    App->>Driver: LoRaReceive(buffer, max_len)
-    Driver->>Radio: GetIrqStatus()
-    alt RX_DONE IRQ
-        Driver->>Radio: ReadBuffer()
-        Radio-->>Driver: Received Data
-        Driver->>Radio: ClearIrqStatus()
-    end
-    Driver-->>App: Received Length
-```
-
-### Wake-up Radio (WuR) Communication
-
-```mermaid
-sequenceDiagram
-    participant TX as WuR Transmitter
-    participant RX as WuR Receiver
-    participant Radio_TX as SX1261 TX
-    participant Radio_RX as SX1261 RX
-    
-    Note over TX,Radio_RX: WuR Initialization
-    TX->>Radio_TX: Sx1261_InitParam_WUR()
-    TX->>Radio_TX: Sx1261_InitFonction_WUR()
-    RX->>Radio_RX: Sx1261_InitParam_WUR()
-    RX->>Radio_RX: Sx1261_InitFonction_WUR()
-    
-    Note over TX,Radio_RX: Duty Cycle Setup
-    RX->>Radio_RX: Sx1261_WurMode(sleep_time, rx_time)
-    
-    Note over TX,Radio_RX: Wake-up Signal Transmission
-    TX->>Radio_TX: Sx1261_Send_WuR_Signal(data, length)
-    Radio_TX->>Radio_TX: SetTx(TX_TIME_MS)
-    
-    Note over TX,Radio_RX: Signal Detection
-    Radio_RX->>Radio_RX: SYNC_WORD_VALID IRQ
-    RX->>Radio_RX: GetIrqStatus()
-    
-    alt Wake-up Detected
-        RX->>RX: Process Wake-up Event
-        RX->>Radio_RX: Return to WuR Mode
-    end
+    APP --> WUBBLE
+    WUBBLE --> SM
+    SM --> TDV
+    SM --> WUR_PROTO
+    TDV --> BLE_ADV
+    TDV --> BLE_SCAN
+    WUR_PROTO --> SX1261_DRV
+    BLE_ADV --> NIMBLE
+    BLE_SCAN --> NIMBLE
+    SX1261_DRV --> SPI_HAL
+    SX1261_DRV --> GPIO_HAL
+    NIMBLE --> BT_CTRL
+    SPI_HAL --> ESP32S3
+    GPIO_HAL --> ESP32S3
+    TIMER_HAL --> ESP32S3
+    BT_CTRL --> BLE_HW
+    ESP32S3 --> SX1261_HW
+    PM --> DS
+    DS --> RTC_MEM
+    GPIO_HAL --> ISR
 ```
 
 ---
 
-## 🔄 System State Machines
+## 3. Block Diagrams
 
-### Radio State Machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> SLEEP
-    SLEEP --> STANDBY_RC : Wakeup Command
-    STANDBY_RC --> STANDBY_XOSC : Set Standby XOSC
-    STANDBY_XOSC --> FS : Set FS
-    
-    FS --> TX : SetTx()
-    TX --> STANDBY_RC : TX_DONE/Timeout
-    TX --> STANDBY_XOSC : TX_DONE (with fallback)
-    
-    FS --> RX : SetRx()
-    RX --> STANDBY_RC : RX_DONE/Timeout
-    RX --> STANDBY_XOSC : RX_DONE (with fallback)
-    
-    STANDBY_RC --> SLEEP : SetSleep()
-    STANDBY_XOSC --> SLEEP : SetSleep()
-    
-    FS --> CAD : SetCad()
-    CAD --> STANDBY_RC : CAD_DONE
-```
-
-### WuR Operation Flow
+### 3.1 Hardware Block Diagram
 
 ```mermaid
 flowchart TD
-    A[Initialize WuR Parameters] --> B[Configure GFSK Modulation]
-    B --> C[Set Sync Word Pattern]
-    C --> D[Configure IRQ for SYNC_WORD_VALID]
-    D --> E[Enter RX Duty Cycle Mode]
+    esp["ESP32-S3<br/>160MHz Dual Core<br/>512KB SRAM"]
+    sx["SX1261<br/>868MHz<br/>WUR Radio"]
+    ble["BLE 5.0<br/>2.4GHz<br/>Radio"]
+    pwr["Power<br/>Management<br/>Unit"]
     
-    E --> F{Signal Detected?}
-    F -->|No| G[Sleep Period]
-    G --> H[Wake for RX Window]
-    H --> F
+    spi["SPI2 Bus<br/>2MHz"]
+    gpio["GPIO Control"]
     
-    F -->|Yes| I[Process Wake-up Event]
-    I --> J[Execute Wake-up Actions]
-    J --> K[Clear IRQ Status]
-    K --> E
+    spi_pins["MISO: GPIO11<br/>MOSI: GPIO10<br/>SCLK: GPIO9"]
+    ctrl_pins["NSS: GPIO7<br/>RST: GPIO1<br/>BUSY: GPIO5<br/>DIO1: GPIO6"]
+    wake["Wake GPIO33<br/>(EXT1)"]
+    rtc["RTC Memory<br/>16KB"]
     
-    L[WuR Transmitter] --> M[Load Wake-up Pattern]
-    M --> N[Set TX Mode]
-    N --> O[Transmit Signal]
-    O --> P[Return to Standby]
+    pwr --> esp
+    rtc --> esp
+    esp --> spi
+    esp --> gpio
+    esp --> ble
+    spi --> sx
+    gpio --> sx
+    esp --> wake
+    spi_pins -.-> spi
+    ctrl_pins -.-> gpio
+    
+    classDef espStyle fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef sxStyle fill:#fff9c4,stroke:#f57f17,stroke-width:2px
+    classDef bleStyle fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef pwrStyle fill:#ffebee,stroke:#b71c1c,stroke-width:2px
+    classDef rtcStyle fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+    classDef pinStyle fill:#f5f5f5,stroke:#424242,stroke-width:1px
+    
+    class esp espStyle
+    class sx sxStyle
+    class ble bleStyle
+    class pwr pwrStyle
+    class rtc rtcStyle
+    class spi_pins,ctrl_pins,wake pinStyle
+```
+
+### 3.2 Software Component Diagram
+
+```mermaid
+graph LR
+    subgraph "Application Components"
+        MAIN[main.c<br/>Entry Point]
+        WUBBLE_C[wubble.c<br/>Protocol Logic]
+    end
+    
+    subgraph "Communication Components"
+        SX1261_DRV[sx1261_driver.c<br/>WUR Driver]
+        NIMBLE_ADV[Nimble_adv.c<br/>BLE Manager]
+    end
+    
+    subgraph "Configuration"
+        CONFIG[config.h<br/>System Config]
+        SDK[sdkconfig<br/>ESP-IDF Config]
+    end
+    
+    subgraph "Data Structures"
+        NT[Neighbour Table<br/>Max: 128 entries]
+        CTX[Context Structure<br/>Radio Parameters]
+    end
+    
+    MAIN --> WUBBLE_C
+    MAIN --> SX1261_DRV
+    WUBBLE_C --> NIMBLE_ADV
+    WUBBLE_C --> SX1261_DRV
+    WUBBLE_C --> NT
+    SX1261_DRV --> CTX
+    NIMBLE_ADV --> NT
+    CONFIG --> ALL[All Components]
+    SDK --> ALL
+    
+    style MAIN fill:#bbdefb
+    style WUBBLE_C fill:#c8e6c9
+    style SX1261_DRV fill:#ffe0b2
+    style NIMBLE_ADV fill:#f8bbd0
 ```
 
 ---
 
-## 📚 API Reference
+## 4. Sequence Diagrams
 
-### Core Initialization Functions
+### 4.1 System Initialization Sequence
 
-#### `LoRaBegin()`
-```c
-int16_t LoRaBegin(uint32_t frequencyInHz, int8_t txPowerInDbm, 
-                  float tcxoVoltage, bool useRegulatorLDO)
-```
-**Purpose**: Initialize the LoRa radio with specified parameters.
-
-**Parameters**:
-- `frequencyInHz`: Operating frequency (150MHz - 960MHz)
-- `txPowerInDbm`: TX power (-17 to +14 dBm)
-- `tcxoVoltage`: TCXO voltage (0.0 to disable, 1.6V - 3.3V)
-- `useRegulatorLDO`: `true` for LDO, `false` for DC-DC regulator
-
-**Returns**: `ERR_NONE` on success, error code on failure
-
-**Example**:
-```c
-// Initialize at 868 MHz, 14 dBm, 3.3V TCXO, DC-DC regulator
-int16_t result = LoRaBegin(868000000, 14, 3.3, false);
-if (result != ERR_NONE) {
-    ESP_LOGE(TAG, "LoRa initialization failed: %d", result);
-}
-```
-
-#### `LoRaConfig()`
-```c
-void LoRaConfig(uint8_t spreadingFactor, uint8_t bandwidth, uint8_t codingRate, 
-                uint16_t preambleLength, uint8_t payloadLen, bool crcOn, bool invertIrq)
-```
-**Purpose**: Configure LoRa modulation parameters.
-
-**Parameters**:
-- `spreadingFactor`: SF7 to SF12 (SX126X_LORA_SF7 - SX126X_LORA_SF12)
-- `bandwidth`: 125kHz, 250kHz, 500kHz (SX126X_LORA_BW_125, etc.)
-- `codingRate`: CR 4/5 to 4/8 (SX126X_LORA_CR_4_5 - SX126X_LORA_CR_4_8)
-- `preambleLength`: Preamble length in symbols (8-65535)
-- `payloadLen`: Fixed payload length (0 for variable length)
-- `crcOn`: Enable CRC checking
-- `invertIrq`: Invert I/Q signals
-
-### Data Transmission Functions
-
-#### `LoRaSend()`
-```c
-bool LoRaSend(uint8_t *pData, uint8_t len, uint8_t mode)
-```
-**Purpose**: Send LoRa packet.
-
-**Parameters**:
-- `pData`: Pointer to data buffer
-- `len`: Data length (1-255 bytes)
-- `mode`: `SX126x_TXMODE_SYNC` for blocking, `SX126x_TXMODE_ASYNC` for non-blocking
-
-**Returns**: `true` on success, `false` on failure
-
-#### `LoRaReceive()`
-```c
-uint8_t LoRaReceive(uint8_t *pData, uint16_t len)
-```
-**Purpose**: Receive LoRa packet.
-
-**Parameters**:
-- `pData`: Buffer for received data
-- `len`: Maximum buffer size
-
-**Returns**: Number of bytes received (0 if no packet)
-
-### Wake-up Radio Functions
-
-#### `send_WUR()`
-```c
-void send_WUR(void)
-```
-**Purpose**: Initialize and start WuR transmission task.
-
-**Usage**: Call once to start continuous wake-up signal transmission.
-
-#### `Listen_WUR()`
-```c
-void Listen_WUR(void)
-```
-**Purpose**: Initialize and start WuR reception mode.
-
-**Usage**: Call once to start listening for wake-up signals.
-
-### Configuration Functions
-
-#### `SetTxPower()`
-```c
-void SetTxPower(int8_t txPowerInDbm)
-```
-**Purpose**: Change transmission power.
-
-**Parameters**:
-- `txPowerInDbm`: Power level (-17 to +14 dBm)
-
-#### `GetPacketStatus()`
-```c
-void GetPacketStatus(int8_t *rssiPacket, int8_t *snrPacket)
-```
-**Purpose**: Get signal quality metrics for last received packet.
-
-**Parameters**:
-- `rssiPacket`: Pointer to store RSSI value (dBm)
-- `snrPacket`: Pointer to store SNR value (dB)
-
----
-
-## ⚙️ Configuration Guide
-
-### Menuconfig Settings
-
-Configure your ESP-IDF project with the following settings:
-
-```bash
-idf.py menuconfig
+```mermaid
+sequenceDiagram
+    participant Main
+    participant SPI
+    participant SX1261
+    participant BLE
+    participant PM as Power Manager
+    
+    Main->>Main: app_main()
+    Main->>SPI: spi_bus_initialize(SPI2_HOST)
+    SPI-->>Main: ESP_OK
+    
+    Main->>SX1261: sx1261_init()
+    activate SX1261
+    SX1261->>SX1261: Configure GPIOs
+    SX1261->>SX1261: gpio_set_direction()
+    SX1261->>SX1261: Reset sequence
+    SX1261->>SPI: spi_bus_add_device()
+    SPI-->>SX1261: handle
+    SX1261->>SX1261: sx126x_reset()
+    deactivate SX1261
+    SX1261-->>Main: Initialized
+    
+    Main->>SX1261: Sx1261_InitParam_WUR()
+    activate SX1261
+    SX1261->>SX1261: Set sync_word[8]
+    SX1261->>SX1261: Set frequency: 868MHz
+    SX1261->>SX1261: Set power: 14dBm
+    SX1261->>SX1261: Set modulation params
+    deactivate SX1261
+    
+    Main->>SX1261: Sx1261_InitFonction_WUR()
+    activate SX1261
+    SX1261->>SX1261: sx126x_set_pkt_type(GFSK)
+    SX1261->>SX1261: sx126x_set_tx_params()
+    SX1261->>SX1261: sx126x_set_rf_freq()
+    SX1261->>SX1261: sx126x_set_standby()
+    deactivate SX1261
+    
+    Main->>BLE: ble_init()
+    activate BLE
+    BLE->>BLE: nvs_flash_init()
+    BLE->>BLE: esp_nimble_hci_init()
+    BLE->>BLE: nimble_port_init()
+    BLE->>BLE: nimble_port_freertos_init()
+    deactivate BLE
+    
+    Main->>PM: Configure deep sleep
+    PM->>PM: esp_sleep_enable_ext1_wakeup()
+    PM->>PM: gpio_deep_sleep_hold_en()
+    
+    Main->>Main: Enter main loop
 ```
 
-Navigate to your custom configuration and set:
+### 4.2 Wake-up Radio (WUR) Communication Sequence
 
-```
-CONFIG_NSS_GPIO=10          # SPI Chip Select
-CONFIG_RST_GPIO=11          # Reset pin
-CONFIG_BUSY_GPIO=12         # Busy status pin
-CONFIG_DIO1_GPIO=13         # Interrupt pin
-CONFIG_TXEN_GPIO=14         # TX enable (optional)
-CONFIG_RXEN_GPIO=15         # RX enable (optional)
-```
-
-### SPI Configuration
-
-The driver uses the following SPI settings:
-- **Frequency**: 2 MHz
-- **Mode**: 0 (CPOL=0, CPHA=0)
-- **Bit Order**: MSB first
-- **CS Control**: Software controlled
-
-### Power Management Options
-
-#### LDO vs DC-DC Regulator
-```c
-// Use LDO regulator (simpler, higher power consumption)
-LoRaBegin(868000000, 14, 3.3, true);
-
-// Use DC-DC regulator (more efficient, requires external components)
-LoRaBegin(868000000, 14, 3.3, false);
-```
-
-#### TCXO Configuration
-```c
-// No external TCXO
-LoRaBegin(868000000, 14, 0.0, false);
-
-// With external TCXO at 3.3V
-LoRaBegin(868000000, 14, 3.3, false);
+```mermaid
+sequenceDiagram
+    participant Init as Initiator
+    participant SX_I as SX1261_Init
+    participant Air as 868MHz
+    participant SX_L as SX1261_Listen
+    participant List as Listener
+    
+    Init->>Init: Backoff timer expires
+    Init->>Init: Role = Initiator
+    
+    Init->>SX_I: send_WUR()
+    activate SX_I
+    SX_I->>SX_I: sx126x_set_dio_irq_params()
+    SX_I->>SX_I: sx126x_clear_irq_status()
+    SX_I->>SX_I: sx126x_write_buffer(data)
+    SX_I->>SX_I: sx126x_set_tx(2000ms)
+    SX_I->>Air: WUR Signal (GFSK, 50kbps)
+    deactivate SX_I
+    
+    Air->>SX_L: Preamble detected
+    activate SX_L
+    SX_L->>SX_L: IRQ_SYNC_WORD_VALID
+    SX_L->>List: Wake interrupt
+    List->>List: Wake from deep sleep
+    List->>List: Check wake reason
+    List->>List: Role = Listener
+    deactivate SX_L
+    
+    Init->>Init: Role = Listener
+    Init->>Init: Start TDV process
+    List->>List: Start TDV process
 ```
 
----
+### 4.3 BLE Neighbor Discovery (TDV) Sequence
 
-## 🔨 Build Instructions
-
-### Prerequisites
-
-- ESP-IDF 5.3.1 or later
-- ESP32-S3 development board
-- SX1261 radio module
-
-### Build Steps
-
-1. **Clone and Setup**:
-```bash
-git clone https://gitlab.inria.fr/fun-team/lora_wur_v2.git
-cd lora_wur_v2
-idf.py set-target esp32s3
+```mermaid
+sequenceDiagram
+    participant Dev as Device
+    participant BLE as BLE Stack
+    participant Scan as Scanner
+    participant Adv as Advertiser
+    participant NT as Neighbour Table
+    
+    Dev->>Dev: make_tdv()
+    Dev->>BLE: ble_init()
+    BLE-->>Dev: Initialized
+    
+    Dev->>Scan: BLE_scan()
+    activate Scan
+    Scan->>Scan: ble_gap_disc(FOREVER)
+    Scan->>Scan: Set scan params
+    
+    loop For MAX1 duration (5s)
+        Adv->>Scan: BLE Advertisement
+        Scan->>Scan: ble_gap_event(DISC)
+        Scan->>Scan: Parse UUID
+        alt UUID matches
+            Scan->>Scan: receive_gf_iot_beacon()
+            Scan->>NT: Add to table
+            NT->>NT: Check duplicates
+            NT-->>Scan: Added/Skipped
+        end
+    end
+    
+    Scan->>Scan: Timer expires
+    deactivate Scan
+    Scan->>Dev: scanner_stop()
+    
+    Dev->>NT: get_neighbour_table()
+    NT-->>Dev: Table with K neighbours
+    
+    alt No neighbours
+        Dev->>Dev: Role = Voyager
+    else Has neighbours
+        Dev->>Dev: Role = Announcer
+        Dev->>Adv: send_tdv()
+        activate Adv
+        Adv->>Adv: type = IOTBEACON
+        Adv->>Adv: ble_server_start()
+        Adv->>Adv: Advertise for 3s
+        deactivate Adv
+    end
 ```
 
-2. **Configure Hardware Pins**:
-```bash
-idf.py menuconfig
-# Navigate to your component configuration
-# Set GPIO pins according to your hardware
-```
+### 4.4 Deep Sleep and Wake-up Sequence
 
-3. **Build Project**:
-```bash
-idf.py build
-```
-
-4. **Flash and Monitor**:
-```bash
-idf.py flash monitor
-```
-
-### Build Flags
-
-Add these to your `CMakeLists.txt` for optimization:
-
-```cmake
-# Enable radio debug output
-target_compile_definitions(${COMPONENT_LIB} PRIVATE 
-    CONFIG_LORA_DEBUG=1
-)
-
-# Optimize for size
-set_property(TARGET ${COMPONENT_LIB} PROPERTY COMPILE_OPTIONS "-Os")
+```mermaid
+sequenceDiagram
+    participant App
+    participant WUR as WUR Module
+    participant PM as Power Manager
+    participant GPIO
+    participant RTC as RTC Memory
+    
+    App->>RTC: Save state variables
+    RTC->>RTC: wake_counter
+    RTC->>RTC: wubble_state
+    
+    App->>WUR: Configure WUR for wake
+    WUR->>WUR: Sx1261_WurMode()
+    WUR->>WUR: Set duty cycle
+    WUR->>WUR: sleepTime: 999ms
+    WUR->>WUR: rxTime: 1ms
+    
+    App->>GPIO: Configure wake sources
+    GPIO->>GPIO: gpio_config(GPIO33)
+    GPIO->>GPIO: gpio_deep_sleep_hold_en()
+    
+    App->>PM: esp_sleep_enable_ext1_wakeup()
+    PM->>PM: Configure EXT1 wake
+    
+    App->>PM: esp_deep_sleep_start()
+    PM->>PM: Enter deep sleep
+    Note over PM: System in deep sleep<br/>Current: ~10µA
+    
+    alt WUR Signal Received
+        WUR->>GPIO: DIO1 interrupt
+        GPIO->>PM: Wake trigger
+    else GPIO33 External Wake
+        GPIO->>PM: EXT1 wake trigger
+    end
+    
+    PM->>PM: Wake sequence
+    PM->>RTC: Restore variables
+    RTC-->>App: Restored state
+    
+    App->>App: Check wake reason
+    App->>App: esp_sleep_get_wakeup_cause()
+    
+    alt ESP_SLEEP_WAKEUP_EXT1
+        App->>App: Handle GPIO wake
+        App->>RTC: Increment wake_counter
+    else ESP_SLEEP_WAKEUP_UNDEFINED
+        App->>App: Power-on reset
+        App->>RTC: Reset counters
+    end
 ```
 
 ---
 
-## 📖 Usage Examples
+## 5. Flowcharts
 
-### Basic LoRa Communication
+### 5.1 Main Application Flow
 
-#### Transmitter Example
-```c
-#include "sx1261_driver.h"
-
-void app_main(void) {
-    // Initialize LoRa
-    int16_t result = LoRaBegin(868000000, 14, 3.3, false);
-    if (result != ERR_NONE) {
-        ESP_LOGE(TAG, "LoRa init failed: %d", result);
-        return;
-    }
+```mermaid
+flowchart TD
+    START([Power On/Reset])
+    START --> INIT[Initialize System]
     
-    // Configure LoRa parameters
-    LoRaConfig(SX126X_LORA_SF7,        // Spreading Factor 7
-               SX126X_LORA_BW_125,     // 125 kHz bandwidth  
-               SX126X_LORA_CR_4_5,     // Coding Rate 4/5
-               8,                       // Preamble length
-               0,                       // Variable length
-               true,                    // CRC enabled
-               false);                  // Standard IQ
-
-    // Send data
-    uint8_t message[] = "Hello LoRa!";
-    while (1) {
-        bool success = LoRaSend(message, sizeof(message), SX126x_TXMODE_SYNC);
-        if (success) {
-            ESP_LOGI(TAG, "Message sent successfully");
-        }
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Send every 5 seconds
-    }
-}
+    INIT --> SPI_INIT[Initialize SPI Bus]
+    SPI_INIT --> WUR_INIT[Initialize SX1261 WUR]
+    WUR_INIT --> CHECK_WAKE{Check Wake Reason}
+    
+    CHECK_WAKE -->|Power On| RESET_COUNTERS[Reset RTC Counters]
+    CHECK_WAKE -->|EXT1 Wake| INC_COUNTER[Increment Wake Counter]
+    CHECK_WAKE -->|WUR Wake| WUR_HANDLER[Handle WUR Event]
+    
+    RESET_COUNTERS --> CONFIG_WAKE[Configure Wake Sources]
+    INC_COUNTER --> CONFIG_WAKE
+    WUR_HANDLER --> CONFIG_WAKE
+    
+    CONFIG_WAKE --> LISTEN_WUR[Listen for WUR Signal]
+    LISTEN_WUR --> DEEP_SLEEP[Enter Deep Sleep]
+    
+    DEEP_SLEEP -->|Wake Event| CHECK_WAKE
 ```
 
-#### Receiver Example
-```c
-#include "sx1261_driver.h"
+### 5.2 Wubble Protocol State Machine Flow
 
-void app_main(void) {
-    // Initialize with same parameters as transmitter
-    LoRaBegin(868000000, 14, 3.3, false);
-    LoRaConfig(SX126X_LORA_SF7, SX126X_LORA_BW_125, SX126X_LORA_CR_4_5,
-               8, 0, true, false);
+```mermaid
+flowchart TD
+    START([Start Wubble])
+    START --> INIT_TIMERS[Initialize Timers]
     
-    // Start receiving
-    SetRx(0xFFFFFF); // Continuous RX mode
+    INIT_TIMERS --> VOYAGER[State: Voyager<br/>Wait for trigger]
     
-    uint8_t rxBuffer[256];
-    while (1) {
-        uint8_t rxLen = LoRaReceive(rxBuffer, sizeof(rxBuffer));
-        if (rxLen > 0) {
-            rxBuffer[rxLen] = '\0'; // Null terminate
-            
-            // Get signal quality
-            int8_t rssi, snr;
-            GetPacketStatus(&rssi, &snr);
-            
-            ESP_LOGI(TAG, "Received: %s (RSSI: %d dBm, SNR: %d dB)", 
-                     rxBuffer, rssi, snr);
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
+    VOYAGER --> CHECK_TRIGGER{Trigger?}
+    CHECK_TRIGGER -->|Backoff Timer| INITIATOR[State: Initiator]
+    CHECK_TRIGGER -->|WUR Received| LISTENER[State: Listener]
+    CHECK_TRIGGER -->|No| VOYAGER
+    
+    INITIATOR --> SEND_WUR[Send WUR Signal]
+    SEND_WUR --> LISTENER
+    
+    LISTENER --> MAKE_TDV[Start TDV Process]
+    MAKE_TDV --> BLE_SCAN[BLE Scan for 5s]
+    BLE_SCAN --> CHECK_NEIGHBORS{Neighbours<br/>Found?}
+    
+    CHECK_NEIGHBORS -->|No| VOYAGER
+    CHECK_NEIGHBORS -->|Yes| ANNOUNCER[State: Announcer]
+    
+    ANNOUNCER --> IDENTIFY[Identify Entity R]
+    IDENTIFY --> SEND_TDV[Send BLE Advertisement]
+    SEND_TDV --> ADV_3S[Advertise for 3s]
+    ADV_3S --> VOYAGER
 ```
 
-### Wake-up Radio (WuR) Implementation
+### 5.3 BLE Scanning Flow
 
-#### WuR Transmitter
-```c
-void wur_transmitter_task(void *pvParameters) {
-    // Initialize WuR transmitter
-    context_t sx_parameters;
-    sx1261_init();
-    sx126x_reset(&sx_parameters);
+```mermaid
+flowchart TD
+    START(["BLE_scan"])
+    START --> INIT["Initialize BLE Stack"]
     
-    Sx1261_InitParam_WUR(&sx_parameters);
-    Sx1261_InitFonction_WUR(&sx_parameters);
+    INIT --> CHECK_ACTIVE{"Scan Active?"}
+    CHECK_ACTIVE -->|"Yes"| LOG_ACTIVE["Log: Already Scanning"]
+    CHECK_ACTIVE -->|"No"| RESET_COUNT["Reset Device Count"]
     
-    uint8_t wakeup_signal[10] = {0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 
-                                 0x7E, 0x7E, 0x7E, 0x7E, 0x7E};
+    LOG_ACTIVE --> RETURN(["Return"])
     
-    while (1) {
-        ESP_LOGI(TAG, "Sending WuR signal");
-        Sx1261_Send_WuR_Signal(&sx_parameters, wakeup_signal, 10);
-        
-        // Send wake-up signal every 3 seconds
-        vTaskDelay(pdMS_TO_TICKS(3000));
-    }
-}
-
-void app_main(void) {
-    xTaskCreate(wur_transmitter_task, "wur_tx", 4096, NULL, 5, NULL);
-}
+    RESET_COUNT --> START_SCAN["Start BLE Scan<br>ble_gap_disc()"]
+    START_SCAN --> CHECK_START{"Started OK?"}
+    
+    CHECK_START -->|"Error"| LOG_ERROR["Log Error"]
+    CHECK_START -->|"Success"| LOG_SUCCESS["Log: Scanning Started"]
+    
+    LOG_ERROR --> RETURN
+    LOG_SUCCESS --> SCAN_LOOP["Scanning..."]
+    
+    SCAN_LOOP --> EVENT{"BLE Event"}
+    
+    EVENT -->|"Discovery"| PARSE["Parse Advertisement"]
+    EVENT -->|"Timeout"| STOP_SCAN["Stop Scanning"]
+    EVENT -->|"Other"| SCAN_LOOP
+    
+    PARSE --> CHECK_UUID{"UUID Match?"}
+    CHECK_UUID -->|"No"| SCAN_LOOP
+    CHECK_UUID -->|"Yes"| CHECK_TABLE{"In Table?"}
+    
+    CHECK_TABLE -->|"Yes"| SCAN_LOOP
+    CHECK_TABLE -->|"No"| ADD_NEIGHBOR["Add to Neighbour Table"]
+    
+    ADD_NEIGHBOR --> CHECK_FULL{"Table Full?"}
+    CHECK_FULL -->|"No"| SCAN_LOOP
+    CHECK_FULL -->|"Yes"| TABLE_FULL["Set Table Full Flag"]
+    
+    TABLE_FULL --> STOP_SCAN
+    STOP_SCAN --> RETURN
 ```
 
-#### WuR Receiver
-```c
-void wur_receiver_task(void *pvParameters) {
-    context_t sx_parameters;
-    sx1261_init();
-    sx126x_reset(&sx_parameters);
-    
-    Sx1261_InitParam_WUR(&sx_parameters);
-    Sx1261_InitFonction_WUR(&sx_parameters);
-    
-    // Configure duty cycle: 500ms sleep, 500ms receive
-    Sx1261_WurMode(&sx_parameters, 500, 500);
-    
-    sx126x_irq_mask_t irq_status;
-    int wake_count = 0;
-    
-    while (1) {
-        sx126x_get_irq_status(&sx_parameters, &irq_status);
-        
-        if (irq_status & SX126X_IRQ_SYNC_WORD_VALID) {
-            wake_count++;
-            ESP_LOGI(TAG, "Wake-up signal detected! Count: %d", wake_count);
-            
-            // Process wake-up event here
-            // ... your application logic ...
-            
-            // Return to WuR mode
-            Sx1261_WurMode(&sx_parameters, 500, 500);
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
+### 5.4 WUR Reception Flow
 
-void app_main(void) {
-    xTaskCreate(wur_receiver_task, "wur_rx", 4096, NULL, 5, NULL);
-}
+```mermaid
+flowchart TD
+    START([WUR RX Mode])
+    START --> CONFIG[Configure RX Duty Cycle]
+    
+    CONFIG --> SET_PARAMS[Set Parameters:<br/>Sleep: 999ms<br/>RX: 1ms]
+    SET_PARAMS --> DUTY_CYCLE[Enter Duty Cycle Mode]
+    
+    DUTY_CYCLE --> SLEEP_PHASE[Sleep Phase<br/>999ms]
+    SLEEP_PHASE --> RX_PHASE[RX Phase<br/>1ms]
+    
+    RX_PHASE --> CHECK_SIGNAL{Signal<br/>Detected?}
+    CHECK_SIGNAL -->|No| SLEEP_PHASE
+    CHECK_SIGNAL -->|Yes| CHECK_PREAMBLE{Preamble<br/>Valid?}
+    
+    CHECK_PREAMBLE -->|No| SLEEP_PHASE
+    CHECK_PREAMBLE -->|Yes| CHECK_SYNC{Sync Word<br/>Valid?}
+    
+    CHECK_SYNC -->|No| SLEEP_PHASE
+    CHECK_SYNC -->|Yes| GEN_IRQ[Generate IRQ]
+    
+    GEN_IRQ --> SET_FLAG[Set Wake Flag]
+    SET_FLAG --> WAKE_SYSTEM[Wake System]
+    
+    WAKE_SYSTEM --> HANDLE[Handle WUR Event]
+    HANDLE --> CLEAR_FLAG[Clear WUR Flag]
+    CLEAR_FLAG --> RETURN([Return to App])
 ```
 
 ---
 
-## 🐛 Troubleshooting
+## 6. Component Details
 
-### Common Issues and Solutions
+### 6.1 Main Component (main.c)
 
-#### 1. SPI Communication Errors
-**Symptoms**: `ERR_SPI_TRANSACTION` errors, radio not responding
+```markdown
+**Purpose**: Application entry point and deep sleep management
 
-**Solutions**:
-- Check SPI wiring and connections
-- Verify GPIO pin assignments in menuconfig
-- Ensure proper power supply (3.3V)
-- Check BUSY pin connection and pull-down resistor
+**Key Functions**:
+- `app_main()`: Initialize system and enter deep sleep loop
+- Wake source configuration (GPIO33 as EXT1)
+- RTC memory management for state persistence
 
-#### 2. Radio Initialization Failure
-**Symptoms**: `ERR_INVALID_MODE` during `LoRaBegin()`
-
-**Solutions**:
-```c
-// Enable debug output to see detailed logs
-LoRaDebugPrint(true);
-
-// Check if radio is detected
-uint8_t wk[2];
-ReadRegister(SX126X_REG_LORA_SYNC_WORD_MSB, wk, 2);
-uint16_t syncWord = (wk[0] << 8) + wk[1];
-if (syncWord != SX126X_SYNC_WORD_PUBLIC && syncWord != SX126X_SYNC_WORD_PRIVATE) {
-    ESP_LOGE(TAG, "Radio not detected - check connections");
-}
+**RTC Variables**:
+- `wake_counter`: Number of wake-ups since power-on
+- `wubble_state`: Current protocol state (0-3)
 ```
 
-#### 3. TX/RX State Machine Errors
-**Symptoms**: `ERR_INVALID_SETTX_STATE` or `ERR_INVALID_SETRX_STATE`
+### 6.2 Wubble Component
 
-**Solutions**:
-- Ensure proper reset sequence before configuration
-- Check BUSY pin timing
-- Verify antenna switching logic (TXEN/RXEN pins)
+```markdown
+**File**: components/wubble/wubble.c
 
-#### 4. Poor Reception Performance
-**Symptoms**: Low RSSI, missed packets, high error rate
+**Purpose**: Wubble protocol state machine implementation
 
-**Solutions**:
-- Check antenna connection and impedance matching
-- Verify frequency calibration
-- Optimize LoRa parameters (SF, BW, CR)
-- Enable RX boosted mode for better sensitivity:
-```c
-sx126x_cfg_rx_boosted(&context, true);
+**Key Functions**:
+- `wubble()`: Main protocol loop
+- `make_tdv()`: Create neighbor table via BLE scanning
+- `send_tdv()`: Broadcast neighbor information
+- `timer_callback()`: Handle protocol timers
+
+**States**:
+- 0: Listener - Waiting for commands
+- 1: Initiator - Sending WUR signals
+- 2: Announcer - Broadcasting neighbor info
+- 3: Voyager - Idle/waiting state
+
+**Timers**:
+- Backoff Timer: Random delay (0-10s)
+- Timer-L1: TDV scan duration (5s)
+- Timer-L2: Maximum wait time (4s)
 ```
 
-#### 5. WuR Mode Not Working
-**Symptoms**: Wake-up signals not detected
+### 6.3 SX1261 Driver Component
 
-**Solutions**:
-- Verify GFSK modulation parameters match between TX and RX
-- Check sync word configuration
-- Ensure proper duty cycle timing
-- Verify IRQ configuration for SYNC_WORD_VALID
+```markdown
+**File**: components/wubble/sx1261_driver.c
 
-### Debug Output
+**Purpose**: Low-level driver for SX1261 WUR transceiver
 
-Enable detailed logging:
-```c
-// Enable driver debug output
-LoRaDebugPrint(true);
+**Key Functions**:
+- `sx1261_init()`: Initialize radio hardware
+- `Sx1261_InitParam_WUR()`: Configure WUR parameters
+- `Sx1261_WurMode()`: Set duty-cycled receive mode
+- `Sx1261_Send_WuR_Signal()`: Transmit wake-up beacon
+- `Listen_WUR()`: Listen for incoming WUR signals
 
-// Check radio status
-uint8_t status = GetStatus();
-ESP_LOGI(TAG, "Radio status: 0x%02X", status);
-
-// Monitor IRQ status
-uint16_t irq = GetIrqStatus();
-ESP_LOGI(TAG, "IRQ status: 0x%04X", irq);
+**Configuration**:
+- Frequency: 868 MHz
+- Modulation: GFSK
+- Bit Rate: 50 kbps
+- Bandwidth: 312 kHz
+- Power: +14 dBm
+- Preamble: 50000 bits
+- Sync Word: 8 bytes (0x7E pattern)
 ```
 
-### Performance Optimization
+### 6.4 NimBLE Advertisement Component
 
-#### Power Consumption
-```c
-// Use DC-DC regulator for better efficiency
-LoRaBegin(868000000, 14, 3.3, false);
+```markdown
+**File**: components/Nimble_adv/Nimble_adv.c
 
-// Reduce TX power when possible
-SetTxPower(0); // 0 dBm instead of 14 dBm
+**Purpose**: BLE advertisement and scanning management
 
-// Use sleep mode between operations
-sx126x_set_sleep(&context, SX126X_SLEEP_CFG_COLD_START);
-```
+**Key Functions**:
+- `ble_init()`: Initialize NimBLE stack
+- `BLE_scan()`: Start neighbor discovery scan
+- `send_tdv()`: Send BLE advertisement
+- `receive_gf_iot_beacon()`: Process received beacons
+- `get_neighbour_table()`: Retrieve discovered neighbors
 
-#### Range Optimization
-```c
-// Use higher spreading factor for longer range
-LoRaConfig(SX126X_LORA_SF12,       // Maximum SF
-           SX126X_LORA_BW_125,     // Narrower bandwidth
-           SX126X_LORA_CR_4_8,     // Higher coding rate
-           8, 0, true, false);
+**BLE Configuration**:
+- Stack: NimBLE
+- Mode: Observer + Broadcaster
+- UUID: 0x850c7d3c-d435-4662-a61f-25627693ddac
+- Advertisement Types:
+  - IBEACON: Standard iBeacon
+  - IOTBEACON: Custom IoT beacon
+  - APPBEACON: Application beacon
 
-// Enable RX boosted mode
-sx126x_cfg_rx_boosted(&context, true);
+**Neighbor Table**:
+- Maximum entries: 128
+- Entry format: [ID(4 bytes) + States(1 byte)]
 ```
 
 ---
 
-## 📊 Performance Specifications
+## 7. Configuration
 
-### LoRa Performance
+### 7.1 Hardware Pin Configuration (config.h)
 
-| Parameter | SF7/125kHz | SF9/125kHz | SF12/125kHz |
-|-----------|------------|------------|-------------|
-| **Data Rate** | 5469 bps | 1758 bps | 293 bps |
-| **Sensitivity** | -124 dBm | -135 dBm | -148 dBm |
-| **Time on Air** (50 bytes) | 46 ms | 144 ms | 1154 ms |
-| **Range** (typical) | 2-5 km | 5-10 km | 10-15 km |
+```c
+// SPI Configuration
+#define PIN_SPI_SCLK    9
+#define PIN_SPI_MOSI    10
+#define PIN_SPI_MISO    11
+#define USED_SPI_HOST   SPI2_HOST
 
-### WuR Performance
+// SX1261 WUR Pins
+#define CONFIG_NSS_GPIO   7   // Chip Select
+#define CONFIG_RST_GPIO   1   // Reset
+#define CONFIG_BUSY_GPIO  5   // Busy indicator
+#define CONFIG_DIO1_GPIO  6   // Digital IO 1
 
-| Parameter | Value | Unit |
-|-----------|-------|------|
-| **GFSK Bit Rate** | 1200 | bps |
-| **Frequency Deviation** | 5000 | Hz |
-| **Bandwidth** | 14600 | Hz |
-| **RX Current** | 4.2 | mA |
-| **Sleep Current** | 160 | nA |
-| **Wake-up Time** | <500 | µs |
-
-### Power Consumption
-
-| Mode | Current | Conditions |
-|------|---------|------------|
-| **Sleep** | 160 nA | Cold start |
-| **Standby RC** | 1.5 µA | 32 MHz RC |
-| **Standby XOSC** | 2.1 µA | 32 MHz XTAL |
-| **RX Continuous** | 4.2 mA | LoRa mode |
-| **TX +14dBm** | 44 mA | Maximum power |
-| **TX 0dBm** | 17 mA | Medium power |
-
----
-
-## 📄 License
-
-This project is based on the Semtech SX126x driver library and is distributed under the Clear BSD License.
-
-```
-Copyright INRIA 2025. All rights reserved.
-
-To be completed
+// Wake-up Configuration
+#define WAKEUP_GPIO      GPIO_NUM_33  // EXT1 wake source
 ```
 
+### 7.2 WUR Parameters (config.h)
+
+```c
+// WUR Timing
+#define DEEP_SLEEP_SLEEP_PERIOD_MS  999
+#define DEEP_SLEEP_RX_PERIOD_MS      1
+#define TX_TIME_MS                   2000
+
+// WUR Radio Configuration
+#define SYNCWORD_LENGTH              8
+#define PREAMBLE_LENGTH_IN_BIT       50000
+#define BR_IN_BPS                    50000   // Bit rate
+#define FDEV_IN_HZ                   23848   // Frequency deviation
+#define BW_DSB_PARAM                 SX126X_GFSK_BW_312000
+#define POWER                        14      // +14 dBm
+```
+
+### 7.3 BLE Configuration (config.h)
+
+```c
+// BLE Parameters
+#define ID_BLE_SIZE                     4
+#define MAX_IOT_IDS_IN_NEIGHBOUR_TABLE  128
+#define ID_IOT                          {0x66, 0x66, 0x66, 0x66}
+
+// Timing
+#define BLE_SCAN_ADV_MAX_DURATION_S     2
+#define ADV_DURATION_DSCV_S             4
+
+// UUID
+#define GF_BEACON_UUID  {0x85, 0x0c, 0x7d, 0x3c, 0xd4, 0x35, \
+                        0x46, 0x62, 0xa6, 0x1f, 0x25, 0x62, \
+                        0x76, 0x93, 0xdd, 0xac}
+```
+
+### 7.4 Wubble Protocol Timers (config.h)
+
+```c
+// Wubble Timers
+#define K      10        // Neighbor threshold
+#define MAX    10000000  // Max backoff (10s in µs)
+#define MAX1   5000000   // TDV scan duration (5s in µs)
+#define MAX2   5000000   // Max wait time (5s in µs)
+```
+
 ---
 
-## 🤝 Contributing
+## 8. API Reference
 
-1. Fork the repository
-2. Create a feature branch
-3. Implement your changes with proper documentation
-4. Add test cases for new functionality
-5. Submit a pull request with detailed description
+### 8.1 Wubble Protocol API
 
-### Code Style Guidelines
+```c
+// Main protocol function
+void wubble(void);
 
-- Follow ESP-IDF coding standards
-- Use clear, descriptive function and variable names
-- Add comprehensive documentation for public APIs
-- Include error handling for all operations
-- Use consistent indentation (4 spaces)
+// TDV Management
+void make_tdv(void);
+void send_tdv(void);
+neighbour_table_t get_neighbour_table(void);
+
+// Timer callback
+void timer_callback(int arg);
+```
+
+### 8.2 SX1261 WUR API
+
+```c
+// Initialization
+void sx1261_init(void);
+void Sx1261_InitParam_WUR(context_t *context);
+void Sx1261_InitFonction_WUR(context_t *context);
+
+// WUR Operations
+void send_WUR(void);
+void Listen_WUR(void);
+void Sx1261_WurMode(context_t *context, uint32_t sleepTime, uint32_t rxTime);
+void Sx1261_Send_WuR_Signal(context_t *context, uint8_t* data, uint8_t length);
+void Sx1261_RstWurFlag(context_t *context);
+
+// Low-level SX126x functions
+sx126x_status_t sx126x_set_sleep(const void* context, const sx126x_sleep_cfgs_t cfg);
+sx126x_status_t sx126x_set_standby(const void* context, const sx126x_standby_cfg_t cfg);
+sx126x_status_t sx126x_set_rx_duty_cycle(const void* context, 
+                                         const uint32_t rx_time_in_ms,
+                                         const uint32_t sleep_time_in_ms);
+```
+
+### 8.3 BLE API
+
+```c
+// Initialization
+void ble_init(void);
+
+// Server Operations
+void ble_server_start(void);
+void ble_server_stop(void);
+
+// Scanning
+void BLE_scan(void);
+void scanner_stop(void);
+
+// Advertisement
+void send_BLE_ID(void);
+
+// Neighbor Management
+void receive_gf_iot_beacon(uint8_t* gf_beacon);
+bool is_iot_id_in_ble_table(size_t table_size, uint8_t* value);
+void print_ble_table(void);
+```
+
+### 8.4 Data Structures
+
+```c
+// Neighbor entry
+typedef struct {
+    uint8_t neighbour[4];      // Device ID
+    uint8_t states_neighbour;  // Device state
+} neighbour_t;
+
+// Neighbor table
+typedef struct {
+    size_t size;
+    neighbour_t neighbours[MAX_NEIGHBOURS];
+} neighbour_table_t;
+
+// Radio context
+typedef struct context_s {
+    uint32_t frequency;
+    uint8_t power;
+    uint8_t sync_word[8];
+    sx126x_mod_params_gfsk_t mode_parameters;
+    sx126x_pkt_params_gfsk_t pkt_parameters;
+} context_t;
+
+// BLE beacon structures
+typedef struct {
+    adv_head_t adv_head;
+    esp_ble_uuid_t uuid;
+    uint8_t iot_id[ID_BLE_SIZE];
+    uint8_t both_states;
+    uint8_t relevance;
+    uint8_t x;
+} __attribute__((packed)) goodfloow_iot_beacon_t;
+```
 
 ---
 
-## 📞 Support
+## 9. State Machine
 
-For technical support and questions:
+### 9.1 State Transitions
 
-1. Check this documentation first
-2. Review the troubleshooting section
-3. Enable debug output to diagnose issues
-4. Submit issues with detailed logs and hardware configuration
+```mermaid
+stateDiagram-v2
+    [*] --> Voyager: Power On
+    
+    Voyager --> Initiator: Backoff Timer Expires
+    Voyager --> Listener: WUR Signal Received
+    
+    Initiator --> Listener: After Sending WUR
+    
+    Listener --> Voyager: No Neighbors Found
+    Listener --> Announcer: Neighbors Found
+    
+    Announcer --> Voyager: After Broadcasting
+    
+    note right of Voyager
+        Idle state
+        Waiting for trigger
+        Deep sleep enabled
+    end note
+    
+    note right of Initiator
+        Sends WUR signal
+        Wakes up neighbors
+        Duration: ~2s
+    end note
+    
+    note right of Listener
+        Performs TDV scan
+        BLE discovery
+        Duration: 5s
+    end note
+    
+    note right of Announcer
+        Broadcasts neighbor info
+        BLE advertisement
+        Duration: 3s
+    end note
+```
 
-### Useful Resources
-
-- [SX1261/62 Datasheet](https://www.semtech.com/products/wireless-rf/lora-core/sx1261)
-- [ESP-IDF Programming Guide](https://docs.espressif.com/projects/esp-idf/en/latest/)
-- [LoRa Alliance Specification](https://lora-alliance.org/resource_hub/lorawan-104-specification-package/)
-
----
-
-*Last Updated: January 2025*  
-*ESP-IDF Version: 5.3.1*  
-*Target: ESP32-S3*
+To be continued

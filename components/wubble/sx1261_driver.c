@@ -1,37 +1,5 @@
-#include <stdio.h>
-#include <inttypes.h>
-#include <math.h>
-#include <stdlib.h>
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include <driver/spi_master.h>
-#include <driver/gpio.h>
-#include "esp_log.h"
-#include <driver/rtc_io.h>
-#include "esp_timer.h"
-#include "../../config/config.h"
-#include <string.h>  // memcpy
-
-//#include "sx126x.h"
-//#include "sx126x_hal.h"
-//#include "sx126x_regs.h"
-
-#include "sx1261_driver.h"
-
-#define TAG "driver"
-
-//#include "wur_sx1261.h"
-//#include "sx126x.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-
 /**
- * @file      driver.c
+ * @file      sx1261_driver.c
  *
  * @brief     SX126x radio driver implementation
  *
@@ -63,6 +31,42 @@ extern "C" {
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+ 
+ 
+ 
+ #include <stdio.h>
+#include <inttypes.h>
+#include <math.h>
+#include <stdlib.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include <driver/spi_master.h>
+#include <driver/gpio.h>
+#include "esp_log.h"
+#include <driver/rtc_io.h>
+#include "esp_timer.h"
+#include "../../config/config.h"
+#include <string.h>  // memcpy
+
+//#include "sx126x.h"
+//#include "sx126x_hal.h"
+//#include "sx126x_regs.h"
+
+#include "sx1261_driver.h"
+
+#define TAG "driver"
+
+//#include "wur_sx1261.h"
+//#include "sx126x.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+
 
 
 static const int SPI_Frequency = 2000000;
@@ -2912,8 +2916,12 @@ void run_RX_WUR(void *pvParameters)
     uint64_t init_time = esp_timer_get_time();; //heure au début à l'initialisation
     uint64_t current_time = 0; //heure courante
     sx126x_irq_mask_t sx126x_irq_mask;
+    Sx1261_WurMode(pvParameters, 500, 500);
+    ESP_LOGW(TAG, "RX_WUR");
+
     while (1)
     {
+
         //we check irq status (note : it has to be coded with interrupt esp)
         sx126x_get_irq_status(pvParameters,&sx126x_irq_mask);
         if (sx126x_irq_mask & SX126X_IRQ_SYNC_WORD_VALID)
@@ -2928,7 +2936,7 @@ void run_RX_WUR(void *pvParameters)
         	vTaskDelay(pdMS_TO_TICKS(1000));
 			//on repasse en sommeil
 			ESP_LOGI(TAG, "Sx1261_WurMode");
-            Sx1261_WurMode(pvParameters, 999, 1);
+            Sx1261_WurMode(pvParameters, 500, 500);
 			SetDioIrqParams(SX126X_IRQ_ALL,   //all interrupts enabled
 					SX126X_IRQ_ALL,  //interrupts on DIO1
 					SX126X_IRQ_NONE,  //interrupts on DIO2
@@ -2937,6 +2945,22 @@ void run_RX_WUR(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+
+
+void run_RX_WUR_copy(void *pvParameters)
+{
+    
+    SetDioIrqParams(SX126X_IRQ_ALL,   //all interrupts enabled
+        SX126X_IRQ_SYNC_WORD_VALID,  //interrupts on DIO1
+        SX126X_IRQ_NONE,  //interrupts on DIO2
+        SX126X_IRQ_NONE); //interrupts on DIO3
+    Sx1261_WurMode(pvParameters, 500, 500);
+
+    ESP_LOGW(TAG, "RX_WUR");
+}
+
+
 
 void send_WUR()
 {
@@ -2948,7 +2972,8 @@ void send_WUR()
     Sx1261_InitParam_WUR(&sx_parameters);
     ESP_LOGI(TAG, "initfonction");
     Sx1261_InitFonction_WUR(&sx_parameters);
-    Sx1261_Send_WuR_Signal(&sx_parameters, data, 0);
+    run_TX_WUR(&sx_parameters);
+    //Sx1261_Send_WuR_Signal(&sx_parameters, data, 0);
     return;
 }
 
@@ -2963,7 +2988,8 @@ void Listen_WUR()
     Sx1261_InitParam_WUR(&sx_parameters);
     ESP_LOGI(TAG, "initfonction");
     Sx1261_InitFonction_WUR(&sx_parameters);
-    run_RX_WUR(&sx_parameters);
+    //run_RX_WUR(&sx_parameters);
+    run_RX_WUR_copy(&sx_parameters);
     return;
 }
 

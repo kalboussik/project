@@ -1,18 +1,5 @@
-#ifndef _DRIVER_H
-#define _DRIVER_H
-
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#include <stdint.h>
-#include <stdbool.h>
-#include "driver/spi_master.h"
-#include "../../../config/config.h"
-
 /**
- * @file      driver.h
+ * @file      sx1261_driver.h
  *
  * @brief     SX126x radio driver definition
  *
@@ -46,20 +33,26 @@ extern "C" {
  */
 
 
+
+#ifndef _DRIVER_H
+#define _DRIVER_H
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "driver/spi_master.h"
+#include "../../../config/config.h"
+
 #define delay(ms) esp_rom_delay_us(ms*1000)
 
-/*
- * -----------------------------------------------------------------------------
- * --- PUBLIC TYPES ------------------------------------------------------------
- */
 
 /**
  * @brief SX126X APIs return status enumeration definition
  */
-
-
-
- 
 typedef enum sx126x_status_e
 {
     SX126X_STATUS_OK = 0,
@@ -2638,6 +2631,10 @@ void run_TX_WUR(void *pvParameters);
  * 
  */
 void run_RX_WUR(void *pvParameters);
+
+
+void run_RX_WUR_copy(void *pvParameters);
+
 
 /**
 * @brief Send the Wake up radio signal
